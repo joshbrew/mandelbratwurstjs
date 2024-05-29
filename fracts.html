@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractal Renderer</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #000;
+            color: #fff;
+        }
+        #controls {
+            display: flex;
+            justify-content: space-between;
+            width: 800px;
+            margin-bottom: 10px;
+        }
+        canvas {
+            border: 1px solid #fff;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="zoom">Zoom</label>
+        <input type="range" id="zoom" min="-100" max="1000" value="1">
+        <span id="zoomValue">0.2</span>
+        <label for="panX">Pan X</label>
+        <input type="range" id="panX" min="-200" max="200" value="0">
+        <span id="panXValue">0</span>
+        <label for="panY">Pan Y</label>
+        <input type="range" id="panY" min="-200" max="200" value="0">
+        <span id="panYValue">0</span>
+        <label for="t">T</label>
+        <input type="range" id="t" min="0" max="10" value="5" step="0.01">
+        <span id="tValue">5</span>
+    </div>
+    <canvas id="fractalCanvas" width="800" height="800"></canvas>
+    <script>
+let imageData = null; // Temporary variable to hold the imageData
+let workers = null;
+let sectionsCompleted = 0;
+const maxIterations = 100;
+let colorCache = new Array(maxIterations + 1);
+let latestZoom = 10;
+let latestPanX = 0;
+let latestPanY = 0;
+let latestT = 5;
+let pendingUpdate = false;
+let tempImageData = null;
+
+let baseColor = 0xffffff; //0x000000
+
+const numWorkers = navigator.hardwareConcurrency || 4; // Use the number of logical processors or default to 4
+
+function createColorCache() {
+    for (let n = 0; n <= maxIterations; n++) {
+        colorCache[n] = getColor(n);
+    }
+}
+
+function getColor(n) {
+    if (n === maxIterations) return baseColor;
+    const hue = 360 * Math.log10(1 + n) / Math.log10(maxIterations);
+    const saturation = 60 + 40 * (n / maxIterations); // low saturation for pastel effect
+    const lightness = 80 - 40 * (n / maxIterations); // high lightness for pastel effect
+    const a = saturation * Math.min(lightness, 100 - lightness) / 100;
+    const f = (n, k = (n + hue / 30) % 12) => lightness - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+
+    const red = Math.round(f(0) * 2.55);
+    const green = Math.round(f(8) * 2.55);
+    const blue = Math.round(f(4) * 2.55);
+
+    return (red << 16) | (green << 8) | blue;
+}
+
+function drawMandelbrot(canvas, ctx, zoom, panX, panY, t) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const logZoom = Math.exp((zoom - 1) / 100); // Logarithmic zoom scale
+    const scaledPanX = panX / 100; // Normalized pan values
+    const scaledPanY = panY / 100; // Normalized pan values
+
+    if (!imageData) {
+        imageData = ctx.createImageData(width, height);
+    }
+
+    if (!tempImageData) {
+        tempImageData = new Uint32Array(width * height);
+    }
+
+    if (!workers) {
+        workers = [];
+        // Create a blob from the worker script element
+        const workerScript = document.getElementById('workerTemplate').textContent;
+        const blob = new Blob([workerScript], { type: 'application/javascript' });
+
+        // Create workers
+        for (let i = 0; i < numWorkers; i++) {
+            const worker = new Worker(URL.createObjectURL(blob));
+            workers.push(worker);
+        }
+    }
+
+    const sectionHeight = Math.ceil(height / numWorkers);
+    const promises = workers.map((worker, i) => {
+        return new Promise((resolve) => {
+            worker.onmessage = function (event) {
+                const { startX, startY, width, height, imageData: sectionImageData } = event.data;
+                const imageDataArray = new Uint32Array(sectionImageData);
+
+                for (let x = 0; x < width; x++) {
+                    for (let y = 0; y < height; y++) {
+                        const index = (startY + y) * canvas.width + (startX + x);
+                        const dataIndex = y * width + x;
+                        tempImageData[index] = imageDataArray[dataIndex];
+                    }
+                }
+
+                resolve();
+            };
+
+            const startX = 0;
+            const startY = i * sectionHeight;
+            const endY = Math.min(startY + sectionHeight, height);
+            worker.postMessage({ startX, startY, width, height: endY - startY, zoom, panX, panY, t, colorCache, canvasWidth: width, canvasHeight: height });
+        });
+    });
+
+    Promise.all(promises).then(() => {
+        for (let i = 0; i < tempImageData.length; i++) {
+            const color = tempImageData[i];
+            const index = i * 4;
+            imageData.data[index] = (color >> 16) & 0xff;     // Red
+            imageData.data[index + 1] = (color >> 8) & 0xff;  // Green
+            imageData.data[index + 2] = color & 0xff;         // Blue
+            imageData.data[index + 3] = 255;                  // Alpha
+        }
+        ctx.putImageData(imageData, 0, 0);
+        sectionsCompleted = 0;
+        pendingUpdate = false;
+        if (latestZoom !== zoom || latestPanX !== panX || latestPanY !== panY || latestT !== t) {
+            drawMandelbrot(canvas, ctx, latestZoom, latestPanX, latestPanY, latestT);
+        }
+    });
+}
+
+window.onload = function() {
+    const canvas = document.getElementById('fractalCanvas');
+    const ctx = canvas.getContext('2d');
+    const zoomSlider = document.getElementById('zoom');
+    const panXSlider = document.getElementById('panX');
+    const panYSlider = document.getElementById('panY');
+    const tSlider = document.getElementById('t');
+
+    const zoomValue = document.getElementById('zoomValue');
+    const panXValue = document.getElementById('panXValue');
+    const panYValue = document.getElementById('panYValue');
+    const tValue = document.getElementById('tValue');
+
+    function updateFractal() {
+        const currentZoom = parseFloat(zoomSlider.value);
+        const currentPanX = parseFloat(panXSlider.value);
+        const currentPanY = parseFloat(panYSlider.value);
+        const currentT = parseFloat(tSlider.value);
+
+        zoomValue.textContent = currentZoom;
+        panXValue.textContent = currentPanX;
+        panYValue.textContent = currentPanY;
+        tValue.textContent = currentT;
+
+        if (!pendingUpdate) {
+            latestZoom = currentZoom;
+            latestPanX = currentPanX;
+            latestPanY = currentPanY;
+            latestT = currentT;
+            pendingUpdate = true;
+            drawMandelbrot(canvas, ctx, latestZoom, latestPanX, latestPanY, latestT);
+        }
+    }
+
+    zoomSlider.addEventListener('input', updateFractal);
+    panXSlider.addEventListener('input', updateFractal);
+    panYSlider.addEventListener('input', updateFractal);
+    tSlider.addEventListener('input', updateFractal);
+
+    // Initial render
+    createColorCache();
+    updateFractal();
+}
+</script>
+<script id="workerTemplate" type="text/javascript">
+    function mandelbrot(cRe, cIm, maxIterations=100) {
+        let zRe = 0, zIm = 0, n = 0;
+        while (n < maxIterations) {
+            const zRe2 = zRe * zRe;
+            const zIm2 = zIm * zIm;
+            if (zRe2 + zIm2 > 4) break;
+            zIm = 2 * zRe * zIm + cIm;
+            zRe = zRe2 - zIm2 + cRe;
+            n++;
+        }
+        return n;
+    }
+
+    function mandelbratwurst(cRe, cIm, maxIterations = 100, t = 5) {
+        let zRe = cRe, zIm = cIm;
+        const constantRe = 0.355, constantIm = 0.355; // Julia set constants
+
+        for (let n = 0; n < maxIterations; n++) {
+            const zRe2 = zRe * zRe;
+            const zIm2 = zIm * zIm;
+            if (zRe2 + zIm2 > 4) return n;
+
+            // Apply some distortion to create a sausage shape
+            const zReTemp = zRe2 - zIm2 + constantRe;
+            zIm = 2 * zRe * zIm + constantIm + 0.1 * Math.sin(t * n);
+            zRe = zReTemp + 0.1 * Math.cos(t * n);
+        }
+
+        return maxIterations;
+    }
+
+    self.onmessage = function(event) {
+        const { startX, startY, width, height, zoom, panX, panY, t, colorCache, canvasWidth, canvasHeight } = event.data;
+        const maxIterations = 100;
+        const logZoom = Math.exp((zoom - 1) / 100);
+        const scaledPanX = panX / 100;
+        const scaledPanY = panY / 100;
+        const aspectRatio = canvasWidth / canvasHeight;
+
+        const sectionImageData = new Uint32Array(width * height);
+        for (let x = 0; x < width; x++) {
+            for (let y = 0; y < height; y++) {
+                const cRe = (x + startX - canvasWidth / 2) / (0.5 * logZoom * canvasWidth * aspectRatio) + scaledPanX;
+                const cIm = (y + startY - canvasHeight / 2) / (0.5 * logZoom * canvasHeight) + scaledPanY;
+                const n = mandelbratwurst(cRe, cIm, maxIterations, t);
+                const color = colorCache[n];
+                const index = y * width + x;
+                sectionImageData[index] = color;
+            }
+        }
+
+        self.postMessage({ startX, startY, width, height, imageData: sectionImageData }, [sectionImageData.buffer]);
+    };
+</script>
+</body>
+</html>
