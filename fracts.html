@@ -32,10 +32,10 @@
         <input type="range" id="zoom" min="-100" max="1000" value="1">
         <span id="zoomValue">0.2</span>
         <label for="panX">Pan X</label>
-        <input type="range" id="panX" min="-200" max="200" value="0">
+        <input type="range" id="panX" min="-200" max="200" value="0" step="0.01">
         <span id="panXValue">0</span>
         <label for="panY">Pan Y</label>
-        <input type="range" id="panY" min="-200" max="200" value="0">
+        <input type="range" id="panY" min="-200" max="200" value="0" step="0.01">
         <span id="panYValue">0</span>
         <label for="t">T</label>
         <input type="range" id="t" min="0" max="10" value="5" step="0.01">
@@ -196,59 +196,100 @@ window.onload = function() {
 }
 </script>
 <script id="workerTemplate" type="text/javascript">
-    function mandelbrot(cRe, cIm, maxIterations=100) {
-        let zRe = 0, zIm = 0, n = 0;
-        while (n < maxIterations) {
-            const zRe2 = zRe * zRe;
-            const zIm2 = zIm * zIm;
-            if (zRe2 + zIm2 > 4) break;
-            zIm = 2 * zRe * zIm + cIm;
-            zRe = zRe2 - zIm2 + cRe;
-            n++;
+// Function to compute Mandelbrot set with escape time smoothing
+
+const escapeRadius2 = 4 * 4; // Precomputed escape radius squared
+const log2 = Math.log(2); // Precomputed log(2)
+    
+function mandelbrot(cRe, cIm, maxIterations = 100) {
+    let zRe = 0, zIm = 0, zRe2 = 0, zIm2 = 0;
+    let n = 0;
+
+    for (; n < maxIterations; n++) {
+        zRe2 = zRe * zRe;
+        zIm2 = zIm * zIm;
+        if (zRe2 + zIm2 > escapeRadius2) break;
+        zIm = 2 * zRe * zIm + cIm;
+        zRe = zRe2 - zIm2 + cRe;
+    }
+    if (n === maxIterations) return maxIterations;
+    const logZn = Math.log(zRe2 + zIm2) / 2;
+    const nu = Math.log(logZn / log2) / log2;
+    return n + 1 - nu; // Escape time smoothing
+}
+
+
+const constantRe = 0.355, constantIm = 0.355; // Julia set constants
+
+// Function to compute Mandelbratwurst set with escape time smoothing
+function mandelbratwurst(cRe, cIm, maxIterations = 100, t = 5) {
+    let zRe = cRe, zIm = cIm, zRe2 = cRe * cRe, zIm2 = cIm * cIm;
+
+    for (let n = 0; n < maxIterations; n++) {
+        if (zRe2 + zIm2 > escapeRadius2) {
+            const logZn = Math.log(zRe2 + zIm2) / 2;
+            const nu = Math.log(logZn / log2) / log2;
+            return n + 1 - nu; // Escape time smoothing
         }
-        return n;
+
+        // Apply some distortion to create a sausage shape
+        const zReTemp = zRe2 - zIm2 + constantRe;
+        zIm = 2 * zRe * zIm + constantIm + 0.1 * Math.sin(t * n);
+        zRe = zReTemp + 0.1 * Math.cos(t * n);
+
+        zRe2 = zRe * zRe;
+        zIm2 = zIm * zIm;
     }
 
-    function mandelbratwurst(cRe, cIm, maxIterations = 100, t = 5) {
-        let zRe = cRe, zIm = cIm;
-        const constantRe = 0.355, constantIm = 0.355; // Julia set constants
+    return maxIterations;
+}
 
-        for (let n = 0; n < maxIterations; n++) {
-            const zRe2 = zRe * zRe;
-            const zIm2 = zIm * zIm;
-            if (zRe2 + zIm2 > 4) return n;
-
-            // Apply some distortion to create a sausage shape
-            const zReTemp = zRe2 - zIm2 + constantRe;
-            zIm = 2 * zRe * zIm + constantIm + 0.1 * Math.sin(t * n);
-            zRe = zReTemp + 0.1 * Math.cos(t * n);
-        }
-
-        return maxIterations;
+// Web Worker message handler
+self.onmessage = function(event) {
+    const { startX, startY, width, height, zoom, panX, panY, t, colorCache, canvasWidth, canvasHeight } = event.data;
+    let maxIterations = 100;
+    if (zoom > 100) {
+        maxIterations += Math.floor((zoom - 100) / 2);
     }
+    const logZoom = Math.exp((zoom - 1) / 100);
+    const scaledPanX = panX / 100;
+    const scaledPanY = panY / 100;
+    const aspectRatio = canvasWidth / canvasHeight;
 
-    self.onmessage = function(event) {
-        const { startX, startY, width, height, zoom, panX, panY, t, colorCache, canvasWidth, canvasHeight } = event.data;
-        const maxIterations = 100;
-        const logZoom = Math.exp((zoom - 1) / 100);
-        const scaledPanX = panX / 100;
-        const scaledPanY = panY / 100;
-        const aspectRatio = canvasWidth / canvasHeight;
+    const scaleX = 0.5 * logZoom * canvasWidth * aspectRatio;
+    const scaleY = 0.5 * logZoom * canvasHeight;
 
-        const sectionImageData = new Uint32Array(width * height);
+    const sectionImageData = new Uint32Array(width * height);
+    let index = 0;
+
+    let previousRow = new Float32Array(width);
+    let currentRow = new Float32Array(width);
+
+    const halfWidth = canvasWidth/2;
+    const halfHeight = canvasHeight/2;
+
+    startXminHalfWidth = startX - halfWidth;
+    startYminHalfHeight = startY - halfHeight
+
+    for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-            for (let y = 0; y < height; y++) {
-                const cRe = (x + startX - canvasWidth / 2) / (0.5 * logZoom * canvasWidth * aspectRatio) + scaledPanX;
-                const cIm = (y + startY - canvasHeight / 2) / (0.5 * logZoom * canvasHeight) + scaledPanY;
-                const n = mandelbratwurst(cRe, cIm, maxIterations, t);
-                const color = colorCache[n];
-                const index = y * width + x;
-                sectionImageData[index] = color;
-            }
-        }
+            const cRe = (x + startXminHalfWidth) / scaleX + scaledPanX;
+            const cIm = (y + startYminHalfHeight) / scaleY + scaledPanY;
 
-        self.postMessage({ startX, startY, width, height, imageData: sectionImageData }, [sectionImageData.buffer]);
-    };
+            let n;
+       
+            n = mandelbratwurst(cRe, cIm, maxIterations, t);
+
+            currentRow[x] = n;
+            const colorIndex = Math.floor(n);
+            const color = colorIndex < colorCache.length ? colorCache[colorIndex] : colorCache[colorCache.length - 1];
+            sectionImageData[index++] = color;
+        }
+        [previousRow, currentRow] = [currentRow, previousRow];
+    }
+
+    self.postMessage({ startX, startY, width, height, imageData: sectionImageData }, [sectionImageData.buffer]);
+};
 </script>
 </body>
 </html>
